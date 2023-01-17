@@ -1,0 +1,9 @@
+{% extends 'layout/default.html' %}
+{% block title %}{{ status_code }}{% endblock %}
+{% block content %}
+    <div class="h-screen flex justify-center items-center">
+        <div>
+            <h1 class="text-white text-2xl uppercase">{{ status_code }} | {{ detail }}</h1>
+        </div>
+    </div>
+{% endblock %}
