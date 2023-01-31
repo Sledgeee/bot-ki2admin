@@ -1,10 +1,10 @@
 import os
-import uuid
+from typing import Union
+
 import db
-from datetime import datetime, timedelta
 from telebot import TeleBot
 from telebot.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BotCommand, User
-from security import JwtPayload, create_access_token
+from utils import api_request
 
 ADMIN_BOT_TOKEN = os.getenv("ADMIN_BOT_TOKEN")
 OWNER_ID = os.getenv("OWNER_ID")
@@ -23,39 +23,13 @@ def start_cmd(message: Message):
 
 def login(from_user: User):
     user_id = str(from_user.id)
-    role = "Адміністратор"
-    if user_id == OWNER_ID:
-        is_admin = True
-        role = "Власник"
-    else:
-        is_admin = True if db.admins.get(user_id) is not None else False
-
+    is_admin = True if api_request('get', f'admins/has-rights/{user_id}')['result'] else False
     if is_admin:
-        existing_hash = db.temp_hashes.get(user_id)
-        if existing_hash is not None:
-            db.temp_hashes.delete(existing_hash["key"])
-
-        payload = JwtPayload(
-            sub=user_id,
-            username=from_user.username,
-            first_name=from_user.first_name,
-            last_name=from_user.last_name,
-            role=role
-        )
-        uuid4 = uuid.uuid4().hex
-        access_token = create_access_token(payload)
-        db.sessions.put({"token": access_token}, user_id)
-        msg = bot.send_message(from_user.id,
-                               "Для авторизації в панель "
-                               "використайте посилання нижче (воно дійсне протягом 5 хвилин):\n"
-                               f"https://ki2admin.deta.dev/login?user_id={user_id}&hash={uuid4}",
-                               protect_content=True,
-                               disable_web_page_preview=True)
-        db.temp_hashes.put({
-            "hash": uuid4,
-            "message_id": msg.message_id,
-            "__expires": int((datetime.utcnow() + timedelta(seconds=300)).timestamp())
-        }, key=user_id)
+        api_request('post', 'auth/cml', json={
+            "user_id": int(user_id),
+            "username": from_user.username,
+            "is_magic": True
+        })
     else:
         bot.send_message(from_user.id, "У вас немає прав адміністратора ❌")
 
@@ -66,31 +40,60 @@ def login_cmd(message: Message):
     login(user)
 
 
-def get_admin_role(from_user: User):
-    req = db.get_admin_requests.get(str(from_user.id))
-    if req is not None:
+def get_admin_account(from_user: User):
+    if api_request('get', f'admins/has-rights/{from_user.id}')['result']:
+        bot.send_message(from_user.id, "Ви вже маєте права адміністратора ⚠️")
+        return
+
+    if db.get_admin_requests.get(str(from_user.id)) is not None:
         bot.send_message(from_user.id, "Ви вже зробили запит на отримання прав адміністратора ⚠️")
+        return
+    db.get_admin_requests.put({"username": from_user.username}, str(from_user.id))
+    markup = InlineKeyboardMarkup()
+    markup.row(
+        InlineKeyboardButton("Одобрити ✅", callback_data=f"aa_{from_user.id}"),
+        InlineKeyboardButton("Відхилити ❌", callback_data=f"da_{from_user.id}")
+    )
+    bot.send_message(OWNER_ID, f"Користувач @{from_user.username} зробив заявку на реєстрацію адмін-аккаунту:",
+                     reply_markup=markup)
+    bot.send_message(from_user.id,
+                     "Запит на реєстрацію створено, очікуйте на відповідь ⏳")
+
+
+def handle_get_admin_account_accepted(user_id: Union[str, int]):
+    db.get_admin_requests.delete(str(user_id))
+    msg = bot.send_message(user_id,
+                           "Ваш запит на отримання прав адміністратора схвалено ✅\n"
+                           "Придумайте логін для вашого аккаунта, я буду очікувати на вашу відповідь...")
+    bot.register_next_step_handler(msg, handle_username_typed)
+
+
+def handle_username_typed(message: Message):
+    username = message.text
+    if username.isalnum() and username.isascii():
+        response = api_request('post', 'auth/register', json={
+            "user_id": int(message.chat.id),
+            "username": username
+        })
+        if "detail" in response:
+            bot.send_message(message.chat.id, 'Цей логін вже існує, спробуйте інший')
+            bot.register_next_step_handler(message, handle_username_typed)
+        else:
+            bot.send_message(message.chat.id, 'Аккаунт успішно створено ✅')
     else:
-        db.get_admin_requests.insert({"user_id": from_user.id}, str(from_user.id))
-        markup = InlineKeyboardMarkup()
-        markup.row(
-            InlineKeyboardButton("Одобрити ✅", callback_data=f"accept-admin_{from_user.id}"),
-            InlineKeyboardButton("Відхилити ❌", callback_data=f"decline-admin_{from_user.id}")
-        )
-        bot.send_message(OWNER_ID, f"Користувач @{from_user.username} хоче отримати доступ адміністратора:",
-                         reply_markup=markup)
-        bot.send_message(from_user.id,
-                         "Запит на отримання прав адміністратора створено, очікуйте на відповідь ⏳")
+        bot.send_message(message.chat.id, 'Ви ввели некорректний логін, він може містити тільки англ. літери та цифри.'
+                                          'Спробуйте ще раз, я буду очікувати на вашу відповідь...')
+        bot.register_next_step_handler(message, handle_username_typed)
 
 
-@bot.message_handler(commands=["get_admin_role"])
+@bot.message_handler(commands=["register"])
 def get_admin_role_cmd(message: Message):
     user = message.from_user
-    get_admin_role(user)
+    get_admin_account(user)
 
 
 def panel(from_user: User):
-    bot.send_message(from_user.id, "https://ki2admin.deta.dev/", disable_web_page_preview=True)
+    bot.send_message(from_user.id, "https://ki2helper.pp.ua/", disable_web_page_preview=True)
 
 
 @bot.message_handler(commands=["panel"])
@@ -106,13 +109,11 @@ def handle_callback(call: CallbackQuery):
     elif call.data == "panel":
         panel(call.from_user)
     elif call.data == "get_admin":
-        get_admin_role(call.from_user)
-    elif "accept-admin_" in call.data:
+        get_admin_account(call.from_user)
+    elif "aa_" in call.data:
         user_id = call.data.split("_")[1]
-        db.get_admin_requests.delete(user_id)
-        db.admins.put({"super": False}, user_id)
-        bot.send_message(user_id, "Ваш запит на отримання прав адміністратора схвалено ✅")
-    elif "decline-admin_" in call.data:
+        handle_get_admin_account_accepted(user_id)
+    elif "da_" in call.data:
         user_id = call.data.split("_")[1]
         db.get_admin_requests.delete(user_id)
         bot.send_message(user_id, "Ваш запит на отримання прав адміністратора відхилено ❌")
@@ -121,8 +122,8 @@ def handle_callback(call: CallbackQuery):
 
 admin_commands = [
     BotCommand("/start", "Розпочати діалог з ботом"),
-    BotCommand("/get_admin_role", "Отримати роль адміністратора"),
-    BotCommand("/panel", "Отримати посилання на адмін-панель"),
-    BotCommand("/login", "Авторизуватись в адмін панель")
+    BotCommand("/register", "Створити адмін-аккаунт"),
+    BotCommand("/panel", "Отримати посилання на панель"),
+    BotCommand("/login", "Авторизуватись в панель через магічне посилання")
 ]
 bot.set_my_commands(commands=admin_commands)
