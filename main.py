@@ -1,9 +1,4 @@
-from datetime import datetime
-
-import pytz
-
-import db
-from bot import bot, HEARTBEAT_CHAT_ID
+from bot import bot
 from fastapi import FastAPI, Request, status
 from telebot.types import Update
 
